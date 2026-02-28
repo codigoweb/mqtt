@@ -3,7 +3,7 @@
 namespace Drupal\mqtt\Plugin\QueueWorker;
 
 use Drupal\Core\Queue\QueueWorkerBase;
-use Drupal\file\Entity\File;
+use Drupal\mqtt\Event\MqttMessageReceivedEvent;
 use Drupal\mqtt\Event\MqttSubscriptionCheckEvent;
 use karpy47\PhpMqttClient\MQTTClient;
 
@@ -22,8 +22,6 @@ class MqttSubscriptionQueue extends QueueWorkerBase {
    * {@inheritdoc}
    */
   public function processItem($data) {
-
-    // Process item operations.
     $broker_config = \Drupal::config('mqtt.mqttbrokersettingsform');
 
     foreach ($data->subscriptions as $subscription) {
@@ -59,56 +57,76 @@ class MqttSubscriptionQueue extends QueueWorkerBase {
       $success = $client->sendConnect($subscription_broker_id);
       if ($success) {
         $client->sendSubscribe($subscription_topic);
-        $mqtt_response = $client->getPublishMessages();
-        $message = $mqtt_response[0]["message"];
+        $mqtt_messages = $client->getPublishMessages();
         $client->sendDisconnect();
 
-        $event = new MqttSubscriptionCheckEvent($subscription);
         $event_dispatcher = \Drupal::service('event_dispatcher');
-        $event_dispatcher->dispatch(MqttSubscriptionCheckEvent::EVENT_NAME, $event);
+        $event = new MqttSubscriptionCheckEvent($subscription);
+        $event_dispatcher->dispatch($event, MqttSubscriptionCheckEvent::EVENT_NAME);
 
-      }
-      $client->close();
-
-      if (!is_null($subscription->get('csv_data')->getValue()[0]['target_id']) && !empty($message)) {
-        $subscription_msg_csv = array($timestamp, $message);
-
-        $data_file = $subscription->get('csv_data')->getValue()[0]['target_id'];
-
-        $sub_data_file = \Drupal::entityTypeManager()->getStorage('file')->load($data_file);
-        $file = $sub_data_file->getFileUri();
-
-        $handle = fopen($file, "a");
-        fputcsv($handle, $subscription_msg_csv);
-        fclose($handle);
-
-      } else {
-        if (!empty($message)) {
-          $subscription_msg_csv = array(
-            ['timestamp', 'message'],
-            [$timestamp, $message]
-          );
-
-          // Open a file in write mode ('w')
-          $fp = fopen(file_directory_temp() . "/sub_$timestamp.csv", 'w');
-
-          // Loop through file pointer and a line
-          foreach ($subscription_msg_csv as $fields) {
-            fputcsv($fp, $fields);
+        foreach ($mqtt_messages as $mqtt_message) {
+          $message = isset($mqtt_message['message']) ? (string) $mqtt_message['message'] : '';
+          if ($message === '') {
+            continue;
           }
-          fclose($fp);
 
-          // todo: destroy temp file
-
-          $sub_directory = $subscription->getFieldDefinition('csv_data')->getSetting('file_directory');
-          $url_scheme = $subscription->getFieldDefinition('csv_data')->getSetting('uri_scheme');
-          $directory = "$url_scheme://$sub_directory";
-          file_prepare_directory($directory, FILE_CREATE_DIRECTORY);
-          $sub_file = \Drupal::service('file.repository')->writeData(fopen(file_directory_temp() . "/sub_$timestamp.csv", 'r'),  $directory . '/sub_' . $subscription->id() . '.csv', FILE_EXISTS_REPLACE);
-          $subscription->set('csv_data', ['target_id' => $sub_file->id()]);
-          $subscription->save();
+          $topic = isset($mqtt_message['topic']) ? (string) $mqtt_message['topic'] : $subscription_topic;
+          $message_event = new MqttMessageReceivedEvent($subscription, $topic, $message, $mqtt_message, $timestamp);
+          $event_dispatcher->dispatch($message_event, MqttMessageReceivedEvent::EVENT_NAME);
+          $this->appendMessageToCsv($subscription, $timestamp, $message);
         }
       }
+      $client->close();
     }
   }
+
+  /**
+   * Appends one message entry to the subscription CSV file.
+   *
+   * @param \Drupal\mqtt\Entity\MqttSubscription $subscription
+   *   The MQTT subscription entity.
+   * @param int $timestamp
+   *   The message timestamp.
+   * @param string $message
+   *   The message payload.
+   */
+  protected function appendMessageToCsv($subscription, $timestamp, $message) {
+    $csv_data = $subscription->get('csv_data')->getValue();
+    if (!empty($csv_data[0]['target_id'])) {
+      $data_file = $csv_data[0]['target_id'];
+      $sub_data_file = \Drupal::entityTypeManager()->getStorage('file')->load($data_file);
+      if ($sub_data_file) {
+        $file = $sub_data_file->getFileUri();
+        $handle = fopen($file, 'a');
+        fputcsv($handle, [$timestamp, $message]);
+        fclose($handle);
+      }
+      return;
+    }
+
+    $subscription_msg_csv = [
+      ['timestamp', 'message'],
+      [$timestamp, $message],
+    ];
+
+    $temp_file = file_directory_temp() . "/sub_$timestamp.csv";
+    $fp = fopen($temp_file, 'w');
+    foreach ($subscription_msg_csv as $fields) {
+      fputcsv($fp, $fields);
+    }
+    fclose($fp);
+
+    $sub_directory = $subscription->getFieldDefinition('csv_data')->getSetting('file_directory');
+    $url_scheme = $subscription->getFieldDefinition('csv_data')->getSetting('uri_scheme');
+    $directory = "$url_scheme://$sub_directory";
+    file_prepare_directory($directory, FILE_CREATE_DIRECTORY);
+    $sub_file = \Drupal::service('file.repository')->writeData(
+      fopen($temp_file, 'r'),
+      $directory . '/sub_' . $subscription->id() . '.csv',
+      FILE_EXISTS_REPLACE
+    );
+    $subscription->set('csv_data', ['target_id' => $sub_file->id()]);
+    $subscription->save();
+  }
+
 }
