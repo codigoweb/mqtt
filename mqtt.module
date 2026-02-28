@@ -27,24 +27,25 @@ function mqtt_help($route_name, RouteMatchInterface $route_match) {
  * Implements hook_cron().
  */
 function mqtt_cron() {
-  // We access our configuration.
   $cron_config = \Drupal::config('mqtt.mqttsubscriptionsettingsform');
   $subscription_poll = FALSE; // todo: add config for everything else
 
   if ($cron_config->get('mqtt_polling_interval') == 0 || $subscription_poll) {
-
-    $query = \Drupal::entityQuery('mqtt')
+    $query = \Drupal::entityQuery('mqtt_subscription')
+      ->accessCheck(FALSE)
       ->condition('status', 1);
 
     $subscription_ids = $query->execute();
-    $subscription_storage = \Drupal::entityTypeManager()->getStorage('mqtt');
+    if (empty($subscription_ids)) {
+      return;
+    }
+
+    $subscription_storage = \Drupal::entityTypeManager()->getStorage('mqtt_subscription');
     $subscriptions = $subscription_storage->loadMultiple($subscription_ids);
 
-    // Get queue.
-    $queue = \Drupal::queue('mqtt_queue');
+    $queue = \Drupal::queue('mqtt_subscription_queue');
     $item = (object) ['subscriptions' => $subscriptions];
 
-    // Create item to queue.
     $queue->createItem($item);
   }
 }
