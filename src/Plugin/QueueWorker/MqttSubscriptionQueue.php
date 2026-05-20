@@ -109,7 +109,7 @@ class MqttSubscriptionQueue extends QueueWorkerBase {
       [$timestamp, $message],
     ];
 
-    $temp_file = file_directory_temp() . "/sub_$timestamp.csv";
+    $temp_file = \Drupal::service('file_system')->getTempDirectory() . "/sub_$timestamp.csv";
     $fp = fopen($temp_file, 'w');
     foreach ($subscription_msg_csv as $fields) {
       fputcsv($fp, $fields);
@@ -119,11 +119,14 @@ class MqttSubscriptionQueue extends QueueWorkerBase {
     $sub_directory = $subscription->getFieldDefinition('csv_data')->getSetting('file_directory');
     $url_scheme = $subscription->getFieldDefinition('csv_data')->getSetting('uri_scheme');
     $directory = "$url_scheme://$sub_directory";
-    file_prepare_directory($directory, FILE_CREATE_DIRECTORY);
+    \Drupal::service('file_system')->prepareDirectory(
+      $directory,
+      \Drupal\Core\File\FileSystemInterface::CREATE_DIRECTORY
+    );
     $sub_file = \Drupal::service('file.repository')->writeData(
-      fopen($temp_file, 'r'),
+      file_get_contents($temp_file),
       $directory . '/sub_' . $subscription->id() . '.csv',
-      FILE_EXISTS_REPLACE
+      \Drupal\Core\File\FileSystemInterface::EXISTS_REPLACE
     );
     $subscription->set('csv_data', ['target_id' => $sub_file->id()]);
     $subscription->save();
